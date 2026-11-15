@@ -4,6 +4,7 @@ Run:  python -m src.drugage
 """
 
 import io
+import random
 import zipfile
 
 import pandas as pd
@@ -46,6 +47,12 @@ def clean(raw: pd.DataFrame) -> pd.DataFrame:
 def load_drugage() -> pd.DataFrame:
     """Load the clean CSV written by main()."""
     return pd.read_csv(DRUGAGE_CSV, dtype={PAPER_ID_COLUMN: "Int64"})
+
+
+def sample_pmids(n: int, seed: int) -> list[int]:
+    """A fixed random sample of the PubMed IDs in DrugAge."""
+    pmids = sorted(int(p) for p in load_drugage()[PAPER_ID_COLUMN].unique())
+    return sorted(random.Random(seed).sample(pmids, n))
 
 
 def main() -> None:
