@@ -60,6 +60,62 @@ def _norm_sex(value: str | None) -> str | None:
     return None if s in ("", "unknown") else s
 
 
+# Dose units by family, as a factor to that family's base unit. Doses compare only within a
+# family; a mass-per-volume dose and a molar dose are "unknown", never "different".
+# Units are lowercased first, so "mm" is mM and "um" is µM, as papers often write them.
+_DOSE_UNITS = {
+    "m": ("molar", 1e6), "mm": ("molar", 1e3), "um": ("molar", 1.0), "nm": ("molar", 1e-3),
+    "g/ml": ("mass/vol", 1e3), "mg/ml": ("mass/vol", 1.0), "ug/ml": ("mass/vol", 1e-3),
+    "g/l": ("mass/vol", 1.0), "mg/l": ("mass/vol", 1e-3),
+    "%": ("fraction", 1e4), "ppm": ("fraction", 1.0),
+    "g": ("mass", 1.0), "mg": ("mass", 1e-3),
+}
+_DOSE_RE = re.compile(
+    r"^(?:about|approximately|approx\.?|~)?\s*"
+    r"(\d+(?:\.\d+)?)\s*"                                  # value
+    r"(?:(?:\*|x|×)\s*10\s*(?:\^\s*|\()\s*(-?\d+)\)?)?\s*"  # optional "x 10^-6" / "*10(-6)"
+    r"([a-z%]+(?:/[a-z]+)?)"                                 # unit, e.g. mm, mg/ml, %
+)
+# Words that mean the string describes a range or a combination, not one dose.
+_MULTI_DOSE_RE = re.compile(r"\bto\b|\bwith\b|\bplus\b|\band\b|\+|–|\d\s*-\s*\d")
+
+
+def parse_dose(value: str | None) -> tuple[str, float] | None:
+    """(unit family, amount in that family's base unit), or None if the dose can't be read.
+
+    '10 µM' and '0.01 mM' both give ('molar', 10.0). Ranges, combinations and doses
+    without a known unit give None.
+    """
+    if value is None:
+        return None
+    s = unicodedata.normalize("NFKC", value).lower().replace("μ", "u").replace("µ", "u")
+    s = re.sub(r"\([^)]*[a-z][^)]*\)", "", s)  # drop notes like "(9% dietary yeast)", keep "10(-6)"
+    s = s.replace("w/v", "").replace("wt.", "").replace("gr ", "g ").strip()
+    if s.endswith(" gr"):
+        s = s[:-1]
+    if _MULTI_DOSE_RE.search(s):
+        return None
+    m = _DOSE_RE.match(s)
+    if not m or m.group(3) not in _DOSE_UNITS:
+        return None
+    family, factor = _DOSE_UNITS[m.group(3)]
+    amount = float(m.group(1)) * 10 ** int(m.group(2) or 0) * factor
+    return family, amount
+
+
+def doses_agree(a: str | None, b: str | None) -> bool | None:
+    """True if both doses are the same amount, False if they clearly differ, None if unknown."""
+    da, db = parse_dose(a), parse_dose(b)
+    if da is None or db is None or da[0] != db[0]:
+        return None
+    return abs(da[1] - db[1]) <= 0.01 * max(da[1], db[1])
+
+
+def dose_correct(truth: str | None, pred: str | None) -> bool:
+    agree = doses_agree(truth, pred)
+    return agree if agree is not None else _norm_text(truth) == _norm_text(pred)
+
+
 @dataclass
 class PaperMatch:
     pairs: list[tuple[dict, LifespanExperiment]] = field(default_factory=list)
@@ -67,24 +123,32 @@ class PaperMatch:
     extra: list[LifespanExperiment] = field(default_factory=list)  # extracted, not in DrugAge
 
 
-def _is_candidate(truth: dict, pred: LifespanExperiment) -> bool:
+def _same_compound_species(truth: dict, pred: LifespanExperiment) -> bool:
     return compounds_match(truth["compound_name"], pred.compound) and species_key(
         truth["species"]
     ) == species_key(pred.species)
+
+
+def _is_candidate(truth: dict, pred: LifespanExperiment) -> bool:
+    """Same compound and species, and not two doses that clearly differ (unknown doses may pair)."""
+    return _same_compound_species(truth, pred) and doses_agree(truth["dosage"], pred.dose) is not False
 
 
 def _pair_cost(truth: dict, pred: LifespanExperiment) -> tuple:
     """Lower is a better pairing: agreeing sex, then agreeing dose, then closest lifespan change."""
     t_sex, p_sex = _norm_sex(truth["gender"]), _norm_sex(pred.sex)
     sex_conflict = t_sex is not None and p_sex is not None and t_sex != p_sex
-    dose_mismatch = _norm_text(truth["dosage"]) != _norm_text(pred.dose)
+    dose_mismatch = not dose_correct(truth["dosage"], pred.dose)
     t_avg, p_avg = truth["avg_lifespan_change_percent"], pred.avg_lifespan_change_pct
     avg_diff = abs(t_avg - p_avg) if t_avg is not None and p_avg is not None else float("inf")
     return (sex_conflict, dose_mismatch, avg_diff)
 
 
 def match_paper(drugage_rows: list[dict], extracted: list[LifespanExperiment]) -> PaperMatch:
-    """Pair DrugAge rows and extracted records of one paper, one-to-one, on compound + species."""
+    """Pair DrugAge rows and extracted records of one paper, one-to-one.
+
+    A pair needs the same compound and species and must not have clearly different doses.
+    """
     candidates = sorted(
         (_pair_cost(t, p), i, j)
         for i, t in enumerate(drugage_rows)
@@ -113,8 +177,8 @@ def compound_level_counts(
     """
     truth = {(norm_compound(t["compound_name"]), species_key(t["species"])): t for t in drugage_rows}
     preds = {(norm_compound(p.compound), species_key(p.species)): p for p in extracted}
-    found = sum(any(_is_candidate(t, p) for p in preds.values()) for t in truth.values())
-    matched = sum(any(_is_candidate(t, p) for t in truth.values()) for p in preds.values())
+    found = sum(any(_same_compound_species(t, p) for p in preds.values()) for t in truth.values())
+    matched = sum(any(_same_compound_species(t, p) for t in truth.values()) for p in preds.values())
     return found, len(truth), matched, len(preds)
 
 
@@ -148,7 +212,7 @@ def field_accuracy(
         if _norm_sex(truth["gender"]) is not None:
             tally("sex", _norm_sex(truth["gender"]) == _norm_sex(pred.sex))
         if _norm_text(truth["dosage"]) is not None:
-            tally("dose", _norm_text(truth["dosage"]) == _norm_text(pred.dose))
+            tally("dose", dose_correct(truth["dosage"], pred.dose))
         if truth["avg_lifespan_significance"] in ("S", "NS"):
             tally("significant", pred.significant == (truth["avg_lifespan_significance"] == "S"))
     return {name: (c, n) for name, (c, n) in acc.items()}

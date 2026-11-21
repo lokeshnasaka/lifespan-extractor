@@ -1,10 +1,12 @@
 from evals.matching import (
     compound_level_counts,
     compounds_match,
+    doses_agree,
     field_accuracy,
     lifespan_correct,
     match_paper,
     norm_compound,
+    parse_dose,
     quote_in_text,
     species_key,
 )
@@ -114,3 +116,41 @@ def test_worst_errors_ranks_largest_gap_first_then_nulls():
         (4, truth(), pred(avg_lifespan_change_pct=-40.0)),
     ]
     assert [e["pmid"] for e in worst_errors(pairs, 2.0)] == [4, 2, 3]
+
+
+def test_parse_dose_converts_units_and_notation():
+    assert parse_dose("10 µM") == parse_dose("0.01 mM") == parse_dose("10 μm") == ("molar", 10.0)
+    assert parse_dose("0.5 mg/ml") == parse_dose("500 µg/mL") == parse_dose("0.5 g/L")
+    assert parse_dose("1*10^-6 %") == parse_dose("1 x 10(-6) wt.% of culture medium")
+    assert parse_dose("1 gr") == parse_dose("1 gr of formulation in 10 mL culture") == ("mass", 1.0)
+    assert parse_dose("25 mg/mL (9% dietary yeast)") == ("mass/vol", 25.0)
+    assert parse_dose("about 26 mg/mL") == ("mass/vol", 26.0)
+
+
+def test_parse_dose_rejects_ranges_combinations_and_missing_units():
+    for dose in ["2 to 10 mm", "5 mM NAM + 100 µM RSV", "0.1 μm arsenite with 1 mm NAC", "10",
+                 "clinically relevant concentrations", "daf-2 RNAi", None]:
+        assert parse_dose(dose) is None, dose
+
+
+def test_doses_agree_is_three_valued():
+    assert doses_agree("10 µM", "0.01 mM") is True
+    assert doses_agree("25 mM", "15 mM") is False
+    assert doses_agree("1 mg/ml", "1 mM") is None  # different unit families
+    assert doses_agree("25 mM", None) is None
+
+
+def test_match_never_pairs_clearly_different_doses():
+    m = match_paper([truth(dosage="25 mM")], [pred(dose="15 mM")])
+    assert m.pairs == [] and len(m.missed) == 1 and len(m.extra) == 1
+
+
+def test_match_pairs_same_dose_written_differently_and_unknown_doses():
+    m = match_paper([truth(dosage="0.01 mM"), truth(dosage=None, gender="Male")],
+                    [pred(dose="10 µM"), pred(dose="clinically relevant", sex="Male")])
+    assert len(m.pairs) == 2
+    assert field_accuracy(m.pairs, 2.0)["dose"] == (1, 1)
+
+
+def test_compound_level_counts_ignore_dose():
+    assert compound_level_counts([truth(dosage="25 mM")], [pred(dose="15 mM")]) == (1, 1, 1, 1)

@@ -110,7 +110,9 @@ def main() -> None:
         "",
         "## Recall and precision",
         "",
-        "Records are matched within a paper on compound + species.",
+        "Records are matched within a paper on compound + species, never pairing two doses that "
+        "clearly differ (doses in units that can't be compared, or missing, may still pair). "
+        "Doses count as equal across units, e.g. 10 µM = 0.01 mM.",
         "",
         "| Level | Recall (DrugAge entries found) | Precision (extracted entries that match) |",
         "|---|---|---|",
