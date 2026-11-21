@@ -1,4 +1,6 @@
-from src.extract import connect, load_latest, save_run
+import pytest
+
+from src.extract import ExtractionError, connect, load_latest, parse_ollama_response, save_run
 from src.schema import ExtractionResult, LifespanExperiment
 
 
@@ -54,3 +56,26 @@ def test_load_latest_returns_newest_run(tmp_path):
     save_run(conn, 1, "model-a", "abstract", [make(compound="Old")])
     save_run(conn, 1, "model-a", "abstract", [make(compound="New")])
     assert [e.compound for e in load_latest(conn, 1, "model-a")] == ["New"]
+
+
+def _ollama_body(**overrides) -> dict:
+    content = ExtractionResult(experiments=[make()]).model_dump_json()
+    base = dict(message={"content": content}, done_reason="stop", prompt_eval_count=9000, eval_count=300)
+    return base | overrides
+
+
+def test_ollama_response_parses():
+    assert parse_ollama_response(1, _ollama_body(), num_ctx=32768) == [make()]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        dict(prompt_eval_count=32468),  # prompt + output fill the window: paper was truncated
+        dict(done_reason="length"),
+        dict(message={"content": '{"experiments": [{"compound": "X"}]}'}),
+    ],
+)
+def test_ollama_response_rejects_truncated_or_invalid(overrides):
+    with pytest.raises(ExtractionError):
+        parse_ollama_response(1, _ollama_body(**overrides), num_ctx=32768)

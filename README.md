@@ -23,10 +23,25 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync
-cp .env.example .env   # then add your ANTHROPIC_API_KEY
 ```
 
-`.env` is git-ignored. The model name is set in `config.toml`.
+The LLM provider and model are set in `config.toml`.
+
+**Local (default, free):** runs the model on your machine with [Ollama](https://ollama.com).
+
+```bash
+brew install ollama && brew services start ollama
+ollama pull gpt-oss:20b   # ~13 GB; needs roughly 24 GB of RAM
+```
+
+Papers that do not fit the `num_ctx` context window fail loudly rather than being
+truncated; raise `num_ctx` (more memory) or use a smaller model if that happens.
+
+**Anthropic API:** set `provider = "anthropic"` and a Claude model name in `config.toml`, then
+
+```bash
+cp .env.example .env   # then add your ANTHROPIC_API_KEY (.env is git-ignored)
+```
 
 ## Run
 

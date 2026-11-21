@@ -10,8 +10,20 @@ import sys
 from datetime import datetime, timezone
 
 import anthropic
+import requests
+from pydantic import ValidationError
 
-from src.config import DB_PATH, EFFORT, EVAL_N_PAPERS, EVAL_SEED, MAX_TOKENS, MODEL
+from src.config import (
+    DB_PATH,
+    EFFORT,
+    EVAL_N_PAPERS,
+    EVAL_SEED,
+    MAX_TOKENS,
+    MODEL,
+    NUM_CTX,
+    OLLAMA_URL,
+    PROVIDER,
+)
 from src.fetch import Paper, fetch_paper
 from src.schema import ExtractionResult, LifespanExperiment
 
@@ -70,25 +82,78 @@ class ExtractionError(Exception):
     pass
 
 
-def make_client() -> anthropic.Anthropic:
+def make_client() -> anthropic.Anthropic | requests.Session:
+    """Client for the configured provider: the Anthropic SDK, or an HTTP session for Ollama."""
+    if PROVIDER == "ollama":
+        session = requests.Session()
+        try:
+            tags = session.get(f"{OLLAMA_URL}/api/tags", timeout=5).json()
+        except requests.RequestException:
+            sys.exit(f"Ollama is not reachable at {OLLAMA_URL}. Start it with: brew services start ollama")
+        names = {m["name"] for m in tags.get("models", [])}
+        if MODEL not in names and f"{MODEL}:latest" not in names:
+            sys.exit(f"Model {MODEL!r} is not downloaded. Run: ollama pull {MODEL}")
+        return session
+    if PROVIDER != "anthropic":
+        sys.exit(f"Unknown llm.provider {PROVIDER!r} in config.toml (use 'ollama' or 'anthropic').")
     if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
         sys.exit("ANTHROPIC_API_KEY is not set. Copy .env.example to .env and add your key.")
     return anthropic.Anthropic()
 
 
-def extract_experiments(paper: Paper, client: anthropic.Anthropic) -> list[LifespanExperiment]:
+def extract_experiments(
+    paper: Paper, client: anthropic.Anthropic | requests.Session
+) -> list[LifespanExperiment]:
     """Send the paper text to the LLM and return the experiments it found."""
+    user_message = f"<paper>\n{paper.text}\n</paper>"
+    if isinstance(client, requests.Session):
+        return _extract_ollama(paper.pmid, user_message, client)
     response = client.messages.parse(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         output_config={"effort": EFFORT},
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": f"<paper>\n{paper.text}\n</paper>"}],
+        messages=[{"role": "user", "content": user_message}],
         output_format=ExtractionResult,
     )
     if response.stop_reason != "end_turn" or response.parsed_output is None:
         raise ExtractionError(f"PMID {paper.pmid}: stop_reason={response.stop_reason}")
     return response.parsed_output.experiments
+
+
+def _extract_ollama(pmid: int, user_message: str, session: requests.Session) -> list[LifespanExperiment]:
+    resp = session.post(
+        f"{OLLAMA_URL}/api/chat",
+        json={
+            "model": MODEL,
+            "stream": False,
+            "format": ExtractionResult.model_json_schema(),
+            "options": {"num_ctx": NUM_CTX, "num_predict": MAX_TOKENS, "temperature": 0},
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+        },
+        timeout=3600,
+    )
+    if not resp.ok:
+        raise ExtractionError(f"PMID {pmid}: Ollama HTTP {resp.status_code}: {resp.text[:200]}")
+    return parse_ollama_response(pmid, resp.json(), NUM_CTX)
+
+
+def parse_ollama_response(pmid: int, body: dict, num_ctx: int) -> list[LifespanExperiment]:
+    """Validate an Ollama /api/chat response, rejecting truncated input or output."""
+    # Ollama silently drops the start of a prompt that does not fit the context window,
+    # so a full window means the model did not see the whole paper.
+    used = body.get("prompt_eval_count", 0) + body.get("eval_count", 0)
+    if used >= num_ctx:
+        raise ExtractionError(f"PMID {pmid}: paper does not fit num_ctx={num_ctx}; raise it in config.toml")
+    if body.get("done_reason") != "stop":
+        raise ExtractionError(f"PMID {pmid}: done_reason={body.get('done_reason')}")
+    try:
+        return ExtractionResult.model_validate_json(body["message"]["content"]).experiments
+    except ValidationError as e:
+        raise ExtractionError(f"PMID {pmid}: model output did not match the schema: {e.errors()[0]}")
 
 
 def connect(path=DB_PATH) -> sqlite3.Connection:
@@ -133,7 +198,7 @@ def load_latest(conn: sqlite3.Connection, pmid: int, model: str) -> list[Lifespa
 
 
 def extract_paper(
-    pmid: int, conn: sqlite3.Connection, client: anthropic.Anthropic
+    pmid: int, conn: sqlite3.Connection, client: anthropic.Anthropic | requests.Session
 ) -> list[LifespanExperiment] | None:
     """Extract one paper, reusing a stored run for the configured model if there is one.
 

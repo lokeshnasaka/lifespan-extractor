@@ -16,9 +16,12 @@ load_dotenv(ROOT / ".env")
 with open(ROOT / "config.toml", "rb") as f:
     _cfg = tomllib.load(f)
 
+PROVIDER: str = _cfg["llm"].get("provider", "anthropic")
 MODEL: str = _cfg["llm"]["model"]
-EFFORT: str = _cfg["llm"]["effort"]
 MAX_TOKENS: int = _cfg["llm"]["max_tokens"]
+EFFORT: str = _cfg["llm"].get("effort", "high")
+OLLAMA_URL: str = _cfg["llm"].get("ollama_url", "http://localhost:11434")
+NUM_CTX: int = _cfg["llm"].get("num_ctx", 32768)
 
 EVAL_N_PAPERS: int = _cfg["eval"]["n_papers"]
 EVAL_SEED: int = _cfg["eval"]["seed"]
